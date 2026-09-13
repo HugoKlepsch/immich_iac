@@ -143,8 +143,10 @@ Both are commented in `compose/immich/docker-compose-immich.yml`. Docs:
 On the server:
 
 ```bash
-# 1. Group that owns library files on the mount
+# 1. Group that owns library files on the mount, plus yourself in it so the
+#    library is readable from the host. Verify with `getent group immich`
 sudo groupadd -f immich
+sudo usermod -aG immich "$USER"   # log out and back in for this to take effect
 
 # 2. Samba credentials, as above
 sudo vim /etc/samba/creds_immich_data && sudo chmod 600 /etc/samba/creds_immich_data
