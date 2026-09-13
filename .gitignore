@@ -1,0 +1,6 @@
+/.idea/
+/generated_config/
+/.env.bash
+/immich_data_mnt/
+/local_data_mnt/
+*.sw*

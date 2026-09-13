@@ -1,0 +1,106 @@
+# Derived from the official compose file for the pinned release:
+#   https://github.com/immich-app/immich/releases/latest/download/docker-compose.yml
+# Differences from upstream:
+#   * env vars come from the sourced .env.bash rather than an `env_file: .env`,
+#     so the values are passed explicitly below.
+#   * the model cache is a bind mount instead of a named volume, so it can be
+#     inspected and cleaned like every other data dir.
+#   * the web UI port binding is configurable per-interface.
+# When bumping IMMICH_VERSION, diff this against upstream's file for that tag -
+# they occasionally change the image digests for redis/postgres.
+
+name: immich
+
+services:
+  immich-server:
+    container_name: immich_server
+    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
+    restart: unless-stopped
+    # Hardware-accelerated transcoding (Intel QSV/VAAPI, as used by plex &
+    # jellyfin on this host): download hwaccel.transcoding.yml for the pinned
+    # release into this directory and uncomment the block below. See
+    # https://docs.immich.app/features/hardware-transcoding
+    # extends:
+    #   file: hwaccel.transcoding.yml
+    #   service: quicksync
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+      - IMMICH_LOG_LEVEL=${IMMICH_LOG_LEVEL:-log}
+      # Reached over the compose network; these names are the service names below.
+      - DB_HOSTNAME=database
+      - DB_PORT=5432
+      - DB_USERNAME=${DB_USERNAME:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD must be set in .env.bash}
+      - DB_DATABASE_NAME=${DB_DATABASE_NAME:-immich}
+      - REDIS_HOSTNAME=redis
+      - REDIS_PORT=6379
+      # Empty = Immich's default (link-local + unique-local), which already
+      # trusts a LAN reverse proxy. Set it in .env.bash to trust only the
+      # specific proxy address.
+      - IMMICH_TRUSTED_PROXIES=${IMMICH_TRUSTED_PROXIES:-}
+    ports:
+      # Set IMMICH_BIND_ADDR to 127.0.0.1 if the reverse proxy runs on this
+      # host, or to a specific LAN IP to pin it to a single interface.
+      - "${IMMICH_BIND_ADDR:-0.0.0.0}:${IMMICH_HOST_PORT:-2283}:2283"
+    volumes:
+      # Immich owns everything under here: library/, upload/, thumbs/,
+      # encoded-video/, profile/, backups/. Not a pre-existing photo folder -
+      # point an External Library at those instead.
+      - ${UPLOAD_LOCATION}:/data
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - redis
+      - database
+    healthcheck:
+      disable: false
+
+  immich-machine-learning:
+    container_name: immich_machine_learning
+    # For hardware-accelerated inference append one of
+    # -[armnn, cuda, rocm, openvino, rknn] to the tag, e.g.
+    # ${IMMICH_VERSION}-openvino for Intel iGPU, and uncomment the extends
+    # block below after downloading hwaccel.ml.yml for the pinned release.
+    # See https://docs.immich.app/features/ml-hardware-acceleration
+    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}
+    restart: unless-stopped
+    # extends:
+    #   file: hwaccel.ml.yml
+    #   service: openvino
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+      - MACHINE_LEARNING_MODEL_TTL=${MACHINE_LEARNING_MODEL_TTL:-300}
+    volumes:
+      # Downloaded CLIP & face-recognition models. Pure cache: safe to delete,
+      # they are re-fetched on next use.
+      - ${IMMICH_MODEL_CACHE_DIR}:/cache
+    # No ports published: only immich-server talks to it, over the compose network.
+    healthcheck:
+      disable: false
+
+  redis:
+    container_name: immich_redis
+    image: docker.io/valkey/valkey:9@sha256:70739f85ad2ee01a726a965584a0f94895f01b0c60b3cc8b0aeef11eaa6888cf
+    restart: unless-stopped
+    healthcheck:
+      test: redis-cli ping | grep -q PONG || exit 1
+
+  database:
+    container_name: immich_postgres
+    # Immich ships its own Postgres image with the vector extensions it needs.
+    # A stock postgres image will not work.
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0@sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env.bash}
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_DB: ${DB_DATABASE_NAME:-immich}
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+      # Uncomment if this data dir is on spinning rust rather than an SSD
+      # DB_STORAGE_TYPE: 'HDD'
+    volumes:
+      # Local disk only - see DB_DATA_LOCATION in .env.bash
+      - ${DB_DATA_LOCATION}:/var/lib/postgresql/data
+    # No ports published: the DB is reachable only from the other containers.
+    shm_size: 128mb
+    healthcheck:
+      disable: false
