@@ -12,6 +12,7 @@ Self-hosted photo & video library.
 * immich-machine-learning - CLIP search & face recognition    (no published port)
 * redis (valkey) - job queue                                  (no published port)
 * database - Postgres + vector extensions                     (no published port)
+* restic - encrypted offsite backup to object storage         (outbound HTTPS only)
 
 Components are run as docker containers, started with docker-compose,
 service lifecycle managed by Systemd unit files. Configuration and secrets
@@ -19,6 +20,23 @@ are stored in `.env.bash`.
 
 Only `immich-server` publishes a port. Everything else is reachable only on
 the compose network, so the exposed surface is exactly one port.
+
+## Documentation
+
+|                                            |                                                        |
+|--------------------------------------------|--------------------------------------------------------|
+| [Backup & restore](docs/backup-restore.md) | What is backed up, how to verify it, how to recover.   |
+
+## Layout
+
+```
+compose/            docker compose service definitions
+docs/               the documents above
+scripts/            backup, verification, restore, alerting
+generated_config/   generated systemd units (gitignored)
+immich_data_mnt/    CIFS mount: the photo library (gitignored)
+local_data_mnt/     local disk: postgres, model cache, restic cache (gitignored)
+```
 
 ## Secrets
 
@@ -72,6 +90,13 @@ local_data_mnt/immich/           # local disk
 
 `UPLOAD_LOCATION` must be a directory Immich owns exclusively. Do not point it
 at an existing photo collection.
+
+The NAS is one copy, not a backup. `scripts/backup.sh` takes an encrypted
+snapshot of the library - originals, profile images and Immich's own database
+dumps, but not the regenerable thumbnails and transcodes - to S3-compatible
+object storage on a daily timer. The Postgres data directory is deliberately
+not backed up: copying the files of a running database does not restore. See
+[docs/backup-restore.md](docs/backup-restore.md).
 
 ### Samba credentials
 
@@ -163,6 +188,10 @@ mkdir -p "$DB_DATA_LOCATION" "$IMMICH_MODEL_CACHE_DIR"
 INSTALL=true ENABLE_NOW=true ./create-systemd-service.sh
 ```
 
+The backup timers are installed but deliberately **not** enabled: the first
+backup uploads the entire library and should be watched, and verified, before
+it runs unattended. See [docs/backup-restore.md](docs/backup-restore.md).
+
 Generated units land in `generated_config/` before installation, so
 `./create-systemd-service.sh` on its own is a safe dry run.
 
@@ -192,4 +221,11 @@ sudo systemctl restart immich
 # environment, not from a .env file)
 source .env.bash
 docker compose -f compose/immich/docker-compose-immich.yml ps
+
+# backups (see docs/backup-restore.md)
+./scripts/backup.sh                      # offsite backup (also on a daily timer)
+./scripts/check-backup.sh                # re-read and checksum part of the repo
+./scripts/restore.sh                     # prove a sample of it restores
+./scripts/notify-discord.sh --test       # confirm alerting still works
+systemctl list-timers 'immich*'
 ```
