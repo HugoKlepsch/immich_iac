@@ -12,9 +12,10 @@
 # container like everything else here. If docker is what broke, a
 # docker-based alert would fail at exactly the moment it is needed.
 #
-# Never exits non-zero on a delivery problem. This runs as a failure handler;
-# a failing failure-handler just produces noise in the journal and, if it were
-# wired to OnFailure, a loop.
+# Never exits non-zero on a delivery problem in --failure or --success mode.
+# Those run as failure handlers; a failing failure-handler just produces noise
+# in the journal and, if it were wired to OnFailure, a loop. --test is the
+# exception: it exists to be checked, so it fails when delivery fails.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -27,14 +28,37 @@ fi
 WEBHOOK="${DISCORD_WEBHOOK_URL:-}"
 HOSTNAME_STR="$(uname -n)"
 
-if [[ -z "$WEBHOOK" ]]; then
-  echo "notify-discord: DISCORD_WEBHOOK_URL is not set; nothing sent." >&2
-  exit 0
-fi
-
 MODE="${1:---test}"
 UNIT="${2:-}"
 EXTRA="${3:-}"
+
+# --test is a check, so it reports a problem by failing. The other modes run as
+# failure handlers and must never exit non-zero: see the header comment.
+_exit_quietly() { [[ "$MODE" == "--test" ]] && exit 1; exit 0; }
+
+if [[ -z "$WEBHOOK" ]]; then
+  echo "notify-discord: DISCORD_WEBHOOK_URL is not set; nothing sent." >&2
+  _exit_quietly
+fi
+
+# A webhook URL is https://discord.com/api/webhooks/<id>/<token>, created under
+# Server Settings -> Integrations -> Webhooks -> New Webhook -> Copy Webhook
+# URL. The link in the Discord app's address bar is a /channels/ URL, which is
+# a different thing entirely - and posting to it returns HTTP 200 with the web
+# app's HTML, so without this check a wrong URL looks exactly like a delivered
+# message. Checked here rather than trusted, because the failure is silent.
+if [[ ! "$WEBHOOK" =~ ^https://(canary\.|ptb\.)?discord(app)?\.com/api/webhooks/[0-9]+/[A-Za-z0-9_-]+$ ]]; then
+  echo "notify-discord: DISCORD_WEBHOOK_URL is not a webhook URL." >&2
+  echo "  expected  https://discord.com/api/webhooks/<id>/<token>" >&2
+  echo "  got       ${WEBHOOK:0:40}..." >&2
+  case "$WEBHOOK" in
+    */channels/*)
+      echo "  That is a channel link from the Discord app's address bar, not a" >&2
+      echo "  webhook. Create one under Server Settings -> Integrations ->" >&2
+      echo "  Webhooks -> New Webhook -> Copy Webhook URL." >&2 ;;
+  esac
+  _exit_quietly
+fi
 
 # Discord colours (decimal)
 RED=15158332
@@ -107,10 +131,18 @@ HTTP="$(printf '%s' "$PAYLOAD" | curl -sS -o /dev/null -w '%{http_code}' \
           --max-time 20 --retry 2 --retry-delay 5 \
           -X POST -H 'Content-Type: application/json' -d @- "$WEBHOOK" 2>&1)"
 
+# A webhook POST returns 204 No Content (200 only with ?wait=true). The URL
+# shape was checked above, so a 2xx here really did come from the API.
 if [[ "$HTTP" == "204" || "$HTTP" == "200" ]]; then
-  echo "notify-discord: sent (${TITLE})"
-else
-  # Do not fail: see the header comment.
-  echo "notify-discord: delivery failed, HTTP ${HTTP}" >&2
+  echo "notify-discord: sent (${TITLE}) HTTP ${HTTP}"
+  exit 0
 fi
-exit 0
+
+echo "notify-discord: delivery FAILED, HTTP ${HTTP}" >&2
+case "$HTTP" in
+  401|403) echo "  The webhook was deleted or its token was rotated." >&2 ;;
+  404)     echo "  No such webhook. It was deleted, or the URL is wrong." >&2 ;;
+  429)     echo "  Rate limited by Discord." >&2 ;;
+  000)     echo "  No HTTP response: DNS, network or TLS failure." >&2 ;;
+esac
+_exit_quietly
