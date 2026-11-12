@@ -73,10 +73,20 @@ restic_run_rw() {
     "$@"
 }
 
+# Initialise the repository only when restic says it does not exist (exit 10,
+# restic >= 0.17). Any other failure - no DNS at boot, object storage down,
+# wrong password, docker not ready - is an error, not an empty bucket, and must
+# fail the run so the alert fires instead of being answered with an init.
 ensure_repo() {
-  if restic_run cat config >/dev/null 2>&1; then
-    return 0
-  fi
+  local rc=0 err
+  err=$(restic_run cat config 2>&1 >/dev/null) || rc=$?
+  case "$rc" in
+    0)  return 0 ;;
+    10) ;;
+    *)  echo "Error: cannot open the repository at ${RESTIC_REPOSITORY} (restic exit ${rc}):" >&2
+        echo "${err}" | tail -n 5 >&2
+        exit 1 ;;
+  esac
   echo "No repository at ${RESTIC_REPOSITORY} - initialising..."
   restic_run init
   echo
